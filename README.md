@@ -18,6 +18,26 @@ All questions are freeform (names, numbers, dates, organizations, titles, …).
 
 ## Reward
 
+### Brier + accuracy scoring
+
+Reward combines calibration and correctness (verbatim from the OpenForecaster `prompt_utils.py`):
+
+| Outcome | Score | Mapped reward [0,1] |
+|---------|-------|---------------------|
+| Correct, p=1.0 | 0 | **1.00** |
+| Correct, p=0.5 | −0.25 | **0.875** |
+| Correct, p=0.0 | −1.0 | 0.50 |
+| Incorrect, p=0.0 | −1.0 | 0.50 |
+| Incorrect, p=0.5 | −1.25 | **0.375** |
+| Incorrect, p=1.0 | −2.0 | **0.00** |
+
+```
+correct  : score = -(1-p)²    reward = (score + 2) / 2
+incorrect: score = -(1 + p²)  reward = (score + 2) / 2
+```
+
+### Correctness (LLM-as-a-judge)
+
 Uses an **LLM-as-a-judge** with the same evaluation criteria as the OpenForecaster paper. The judge understands:
 
 - **Paraphrases**: "New York City" ↔ "NYC"
@@ -49,7 +69,7 @@ submit_answer(answer: str, confidence: float = 0.5)
 - `answer`: Your concise final answer (a few words)
 - `confidence`: Probability [0, 1] that the answer is correct
 
-Calling this tool ends the episode. Reward is 1.0 (correct) or 0.0 (incorrect).
+Calling this tool ends the episode. Reward uses the combined **Brier + accuracy** rule from the OpenForecaster prompts (see below).
 
 ## Prompt
 

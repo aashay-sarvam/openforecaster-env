@@ -4,13 +4,15 @@ OpenForecaster ORS Environment Server
 Loads nikhilchandak/OpenForesight from HuggingFace and serves open-ended
 forecasting questions as an OpenReward Standard (ORS) environment.
 
-Reward — LLM-as-a-judge (cloud API, no local GPU required):
+Reward — Brier + accuracy combined (from OpenForecaster prompt_utils.py):
+  correct  : -(1-p)^2   mapped to [0.5, 1.0]
+  incorrect: -(1+p^2)   mapped to [0.0, 0.5]
+  full range mapped to [0, 1] via (score + 2) / 2
+
+Correctness is determined by an LLM-as-a-judge (cloud API, no local GPU):
   Primary  : Anthropic claude-haiku-4-5 via secrets["ANTHROPIC_API_KEY"]
   Fallback : OpenAI gpt-4o-mini       via secrets["OPENAI_API_KEY"]
   Heuristic: numeric relative-error + substring match (if no API key set)
-
-The judge prompt handles paraphrases, specificity, and numeric relative-error
-(<= 1%), matching the evaluation criteria from the OpenForecaster paper.
 
 Tool: submit_answer(answer: str, confidence: float)
 """
@@ -88,7 +90,29 @@ def _parse_judgment(text: str) -> float | None:
     return None
 
 # ---------------------------------------------------------------------------
-# Heuristic fallback reward (substring + numeric relative-error)
+# Combined Brier + accuracy reward (verbatim from OpenForecaster prompt_utils)
+# ---------------------------------------------------------------------------
+
+def _brier_accuracy_reward(correct: bool, confidence: float) -> float:
+    """
+    Brier + accuracy combined reward, mapped from [-2, 0] to [0, 1].
+
+    From the OpenForecaster prompt (prompt_utils.py):
+      correct  : -(1-p)^2   in [-1,  0]
+      incorrect: -(1 + p^2) in [-2, -1]
+
+    Mapped via (score + 2) / 2:
+      correct,   p=1.0 -> 1.00   incorrect, p=1.0 -> 0.00
+      correct,   p=0.5 -> 0.875  incorrect, p=0.5 -> 0.375
+      correct,   p=0.0 -> 0.50   incorrect, p=0.0 -> 0.50
+    """
+    p = max(0.0, min(1.0, float(confidence)))
+    score = -((1 - p) ** 2) if correct else -(1 + p ** 2)
+    return round((score + 2) / 2, 4)
+
+
+# ---------------------------------------------------------------------------
+# Heuristic correctness check (substring + numeric relative-error)
 # ---------------------------------------------------------------------------
 
 def _extract_number(s: str) -> float | None:
@@ -98,10 +122,11 @@ def _extract_number(s: str) -> float | None:
     return float(m.group()) if m else None
 
 
-def _heuristic_reward(ground_truth: str, model_answer: str) -> float:
+def _heuristic_correct(ground_truth: str, model_answer: str) -> bool:
     """
-    1. Try numeric relative-error match (<= 1%).
-    2. Fall back to case-insensitive substring containment.
+    Returns True if model_answer is considered correct heuristically:
+    1. Numeric relative-error <= 1%.
+    2. Case-insensitive substring containment.
     """
     gt = ground_truth.strip()
     ans = model_answer.strip()
@@ -111,14 +136,12 @@ def _heuristic_reward(ground_truth: str, model_answer: str) -> float:
     if gt_num is not None and ans_num is not None:
         denom = (abs(gt_num) + abs(ans_num)) / 2
         if denom == 0:
-            return 1.0 if gt_num == ans_num else 0.0
-        rel_err = abs(gt_num - ans_num) / denom
-        return 1.0 if rel_err <= 0.01 else 0.0
+            return gt_num == ans_num
+        return abs(gt_num - ans_num) / denom <= 0.01
 
-    # substring match
     gt_l = gt.lower()
     ans_l = ans.lower()
-    return 1.0 if (gt_l in ans_l or ans_l in gt_l) else 0.0
+    return gt_l in ans_l or ans_l in gt_l
 
 # ---------------------------------------------------------------------------
 # LLM judge
@@ -242,8 +265,8 @@ class OpenForecaster(Environment):
 
     Splits : train (52 k tasks), validation (207 tasks), test (302 tasks).
     Tool   : submit_answer(answer, confidence)
-    Reward : LLM-as-a-judge (same prompt as local_judge/llm_judge.py), with
-             heuristic fallback when no API key is configured.
+    Reward : Brier + accuracy combined (from OpenForecaster prompt_utils.py).
+             Correctness from LLM-as-a-judge; heuristic fallback if no API key.
 
     Secrets (set in OpenReward environment settings):
       ANTHROPIC_API_KEY  — preferred judge (claude-haiku-4)
@@ -281,35 +304,39 @@ class OpenForecaster(Environment):
         """
         Submit your final answer to the forecasting question.
         Provide a concise answer (name, number, date, …) and your confidence (0–1).
+        Reward = Brier + accuracy: correct+confident → 1.0, incorrect+confident → 0.0.
         Calling this tool ends the episode.
         """
         cfg = self.config
         model_answer = params.answer.strip()
 
-        # Try LLM judge first (same logic as local_judge/llm_judge.py)
-        reward = _llm_judge(
+        # Step 1: determine correctness via LLM judge (or heuristic fallback)
+        llm_result = _llm_judge(
             question=cfg.question_title,
             ground_truth=cfg.answer,
             model_answer=model_answer,
             secrets=self._secrets,
         )
-        judge_used = "llm"
-
-        if reward is None:
-            # Fallback: heuristic (numeric relative-error + substring)
-            reward = _heuristic_reward(cfg.answer, model_answer)
+        if llm_result is not None:
+            correct = llm_result > 0.5
+            judge_used = "llm"
+        else:
+            correct = _heuristic_correct(cfg.answer, model_answer)
             judge_used = "heuristic"
             logger.warning(
-                "Using heuristic reward for question %r (no LLM judge available)",
+                "Using heuristic correctness for question %r (no LLM judge available)",
                 cfg.question_title[:60],
             )
 
-        correct = reward > 0.5
+        # Step 2: combine correctness + calibration via Brier+accuracy rule
+        reward = _brier_accuracy_reward(correct, params.confidence)
+
         feedback = (
             f"Ground truth: {cfg.answer!r}. "
             f"Your answer: {model_answer!r}. "
             f"{'Correct!' if correct else 'Incorrect.'} "
-            f"Reward: {reward:.2f} (judge: {judge_used})"
+            f"Confidence: {params.confidence:.2f}. "
+            f"Reward: {reward:.4f} (judge: {judge_used})"
         )
         return ToolOutput(
             blocks=[TextBlock(type="text", text=feedback)],
