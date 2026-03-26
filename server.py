@@ -159,6 +159,26 @@ def _llm_judge(
     """
     prompt = _build_judge_prompt(question, ground_truth, model_answer)
 
+    from openai import OpenAI
+
+    # --- OpenRouter (preferred when key provided — cheap, fast, no billing setup) ---
+    api_key = secrets.get("openrouter_api_key") or os.environ.get("OPENROUTER_API_KEY")
+    if api_key:
+        try:
+            client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
+            resp = client.chat.completions.create(
+                model="google/gemini-2.0-flash-001",
+                max_tokens=512,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = resp.choices[0].message.content or ""
+            judgment = _parse_judgment(text)
+            if judgment is not None:
+                return judgment
+            logger.warning("OpenRouter judge returned unparseable response: %s", text[:200])
+        except Exception as exc:
+            logger.warning("OpenRouter judge failed: %s", exc)
+
     # --- Anthropic ---
     api_key = secrets.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
     if api_key:
@@ -182,7 +202,6 @@ def _llm_judge(
     api_key = secrets.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if api_key:
         try:
-            from openai import OpenAI
             client = OpenAI(api_key=api_key)
             resp = client.chat.completions.create(
                 model="gpt-4o-mini",
@@ -197,7 +216,7 @@ def _llm_judge(
         except Exception as exc:
             logger.warning("OpenAI judge failed: %s", exc)
 
-    return None  # no API available / both failed
+    return None  # no API available / all failed
 
 # ---------------------------------------------------------------------------
 # Dataset loading (once at import time)
