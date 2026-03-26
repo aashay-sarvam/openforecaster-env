@@ -10,8 +10,9 @@ Reward — Brier + accuracy combined (from OpenForecaster prompt_utils.py):
   full range mapped to [0, 1] via (score + 2) / 2
 
 Correctness is determined by an LLM-as-a-judge (cloud API, no local GPU):
-  Primary  : Anthropic claude-haiku-4-5 via secrets["ANTHROPIC_API_KEY"]
-  Fallback : OpenAI gpt-4o-mini       via secrets["OPENAI_API_KEY"]
+  Primary  : OPENAI_API_KEY secret — auto-routes to OpenRouter (gemini-2.0-flash)
+             if key starts with "sk-or-v1-", else uses OpenAI gpt-4o-mini
+  Fallback : ANTHROPIC_API_KEY secret — claude-haiku-4-5
   Heuristic: numeric relative-error + substring match (if no API key set)
 
 Tool: submit_answer(answer: str, confidence: float)
@@ -161,13 +162,21 @@ def _llm_judge(
 
     from openai import OpenAI
 
-    # --- OpenRouter (preferred when key provided — cheap, fast, no billing setup) ---
-    api_key = secrets.get("openrouter_api_key") or os.environ.get("OPENROUTER_API_KEY")
+    # --- OpenRouter OR OpenAI (using OPENAI_API_KEY; key prefix determines routing) ---
+    # OpenRouter keys start with "sk-or-v1-"; standard OpenAI keys start with "sk-".
+    # We auto-detect and route accordingly so the caller only needs to set OPENAI_API_KEY.
+    api_key = secrets.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if api_key:
         try:
-            client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
+            if api_key.startswith("sk-or-v1-"):
+                # OpenRouter — route to gemini-2.0-flash which is cheap and capable
+                client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
+                model = "google/gemini-2.0-flash-001"
+            else:
+                client = OpenAI(api_key=api_key)
+                model = "gpt-4o-mini"
             resp = client.chat.completions.create(
-                model="google/gemini-2.0-flash-001",
+                model=model,
                 max_tokens=512,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -175,9 +184,9 @@ def _llm_judge(
             judgment = _parse_judgment(text)
             if judgment is not None:
                 return judgment
-            logger.warning("OpenRouter judge returned unparseable response: %s", text[:200])
+            logger.warning("OpenAI/OpenRouter judge returned unparseable response: %s", text[:200])
         except Exception as exc:
-            logger.warning("OpenRouter judge failed: %s", exc)
+            logger.warning("OpenAI/OpenRouter judge failed: %s", exc)
 
     # --- Anthropic ---
     api_key = secrets.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
@@ -197,24 +206,6 @@ def _llm_judge(
             logger.warning("Anthropic judge returned unparseable response: %s", text[:200])
         except Exception as exc:
             logger.warning("Anthropic judge failed: %s", exc)
-
-    # --- OpenAI ---
-    api_key = secrets.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
-    if api_key:
-        try:
-            client = OpenAI(api_key=api_key)
-            resp = client.chat.completions.create(
-                model="gpt-4o-mini",
-                max_tokens=512,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            text = resp.choices[0].message.content or ""
-            judgment = _parse_judgment(text)
-            if judgment is not None:
-                return judgment
-            logger.warning("OpenAI judge returned unparseable response: %s", text[:200])
-        except Exception as exc:
-            logger.warning("OpenAI judge failed: %s", exc)
 
     return None  # no API available / all failed
 
