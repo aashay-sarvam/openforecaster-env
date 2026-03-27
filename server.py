@@ -4,10 +4,10 @@ OpenForecaster ORS Environment Server
 Loads nikhilchandak/OpenForesight from HuggingFace and serves open-ended
 forecasting questions as an OpenReward Standard (ORS) environment.
 
-Reward — Brier + accuracy combined (from OpenForecaster prompt_utils.py):
-  correct  : -(1-p)^2   mapped to [0.5, 1.0]
-  incorrect: -(1+p^2)   mapped to [0.0, 0.5]
-  full range mapped to [0, 1] via (score + 2) / 2
+Reward — Brier + accuracy combined (paper formula from author shash42):
+  correct  : 1-(p-1)^2 + 1  mapped to [0.667, 1.000]
+  incorrect: -p^2            mapped to [0.000, 0.333]
+  full range mapped to [0, 1] via (score + 1) / 3
 
 Correctness is determined by an LLM-as-a-judge (cloud API, no local GPU):
   Primary  : OPENAI_API_KEY secret — auto-routes to OpenRouter (gemini-2.0-flash)
@@ -96,20 +96,22 @@ def _parse_judgment(text: str) -> float | None:
 
 def _brier_accuracy_reward(correct: bool, confidence: float) -> float:
     """
-    Brier + accuracy combined reward, mapped from [-2, 0] to [0, 1].
+    Brier + accuracy combined reward (verbatim paper formula, normalized to [0, 1]).
 
-    From the OpenForecaster prompt (prompt_utils.py):
-      correct  : -(1-p)^2   in [-1,  0]
-      incorrect: -(1 + p^2) in [-2, -1]
+    Paper scoring rule (from author shash42):
+      brier = 1 - (p-1)^2  if correct   →  range [0, 1]
+      brier = -p^2          if incorrect →  range [-1, 0]
+      score = brier + int(correct)       →  range [-1, 2]
 
-    Mapped via (score + 2) / 2:
-      correct,   p=1.0 -> 1.00   incorrect, p=1.0 -> 0.00
-      correct,   p=0.5 -> 0.875  incorrect, p=0.5 -> 0.375
-      correct,   p=0.0 -> 0.50   incorrect, p=0.0 -> 0.50
+    Normalized via (score + 1) / 3:
+      correct,   p=1.0 -> 1.000   incorrect, p=1.0 -> 0.000
+      correct,   p=0.5 -> 0.917   incorrect, p=0.5 -> 0.250
+      correct,   p=0.0 -> 0.667   incorrect, p=0.0 -> 0.333
     """
     p = max(0.0, min(1.0, float(confidence)))
-    score = -((1 - p) ** 2) if correct else -(1 + p ** 2)
-    return round((score + 2) / 2, 4)
+    brier = 1 - (p - 1) ** 2 if correct else -(p ** 2)
+    score = brier + int(correct)  # range [-1, 2]
+    return round((score + 1) / 3, 4)
 
 
 # ---------------------------------------------------------------------------
