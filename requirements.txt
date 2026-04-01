@@ -6,3 +6,4 @@ huggingface_hub
 pydantic>=2.0
 anthropic>=0.40.0
 openai>=1.50.0
+# reward-hacking agent (agent.py uses anthropic SDK directly — already listed above)
